@@ -3,9 +3,31 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { PostCreatedEvent, EventData } from '@/lib/server/events/types'
+import type { CommentCreatedEvent, PostCreatedEvent, EventData } from '@/lib/server/events/types'
 import { linearHook } from '@/integrations/linear/server/hook'
 import { updateLinearIssue } from '@/integrations/linear/server/issues'
+
+const mocks = vi.hoisted(() => ({
+  findLinkedLinearIssueId: vi.fn(),
+  claimHookDelivery: vi.fn(),
+  completeHookDelivery: vi.fn(),
+  failHookDelivery: vi.fn(),
+  releaseHookDelivery: vi.fn(),
+}))
+
+vi.mock('@/integrations/linear/server/comments', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('@/integrations/linear/server/comments')
+  >()
+  return { ...actual, findLinkedLinearIssueId: mocks.findLinkedLinearIssueId }
+})
+
+vi.mock('@/lib/server/events/hook-idempotency', () => ({
+  claimHookDelivery: mocks.claimHookDelivery,
+  completeHookDelivery: mocks.completeHookDelivery,
+  failHookDelivery: mocks.failHookDelivery,
+  releaseHookDelivery: mocks.releaseHookDelivery,
+}))
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,11 +62,51 @@ function makePostCreatedEvent(overrides: Record<string, unknown> = {}): PostCrea
   }
 }
 
+function makeCommentCreatedEvent(
+  overrides: Record<string, unknown> = {}
+): CommentCreatedEvent {
+  return {
+    id: 'evt-comment-1',
+    type: 'comment.created',
+    timestamp: '2025-01-01T00:00:00Z',
+    actor: { type: 'user', userId: 'user_2', email: 'commenter@test.com' },
+    data: {
+      comment: {
+        id: 'comment_1',
+        content: 'Here is a recording: [Demo](/api/storage/portal-media/demo.mov)',
+        authorName: 'John Smith',
+        isPrivate: false,
+        ...overrides,
+      },
+      post: {
+        id: 'post_1',
+        title: 'Bug report',
+        boardId: 'board_1',
+        boardSlug: 'bugs',
+      },
+    },
+  }
+}
+
 const target = { channelId: 'team-abc' }
-const config = { accessToken: 'lin_test_token', rootUrl: 'https://app.example.com' }
+const config = {
+  accessToken: 'lin_test_token',
+  rootUrl: 'https://app.example.com',
+  integrationId: 'integration_1',
+}
 
 beforeEach(() => {
   vi.restoreAllMocks()
+  mocks.findLinkedLinearIssueId.mockReset()
+  mocks.findLinkedLinearIssueId.mockResolvedValue(undefined)
+  mocks.claimHookDelivery.mockReset()
+  mocks.claimHookDelivery.mockResolvedValue(true)
+  mocks.completeHookDelivery.mockReset()
+  mocks.completeHookDelivery.mockResolvedValue(undefined)
+  mocks.failHookDelivery.mockReset()
+  mocks.failHookDelivery.mockResolvedValue(undefined)
+  mocks.releaseHookDelivery.mockReset()
+  mocks.releaseHookDelivery.mockResolvedValue(undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -52,7 +114,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('linearHook', () => {
-  it('skips non post.created events', async () => {
+  it('skips unsupported events', async () => {
     const event = { type: 'post.status_changed' } as unknown as EventData
     const result = await linearHook.run(event, target, config)
     expect(result).toEqual({ success: true })
@@ -135,6 +197,7 @@ describe('linearHook', () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain('Authentication failed')
     expect(result.shouldRetry).toBe(false)
+    expect(result.authExpired).toBe(true)
   })
 
   it('returns retryable failure on 429', async () => {
@@ -145,6 +208,83 @@ describe('linearHook', () => {
     expect(result.success).toBe(false)
     expect(result.error).toBe('Rate limited')
     expect(result.shouldRetry).toBe(true)
+  })
+
+  it('adds a public comment to the already-linked Linear issue', async () => {
+    mocks.findLinkedLinearIssueId.mockResolvedValue('issue-uuid-1')
+    const fetchMock = mockFetch(200, {
+      data: { commentCreate: { success: true, comment: { id: 'linear-comment-1' } } },
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await linearHook.run(makeCommentCreatedEvent(), target, config, {
+      jobId: 'job-comment-1',
+    })
+
+    expect(result).toEqual({ success: true })
+    expect(mocks.findLinkedLinearIssueId).toHaveBeenCalledWith('post_1', 'integration_1')
+    expect(mocks.claimHookDelivery).toHaveBeenCalledWith('job-comment-1', 'linear_comment')
+    expect(mocks.completeHookDelivery).toHaveBeenCalledWith('job-comment-1')
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.query).toContain('commentCreate')
+    expect(body.variables.input.issueId).toBe('issue-uuid-1')
+    expect(body.variables.input.body).toContain('**John Smith commented:**')
+    expect(body.variables.input.body).toContain(
+      '![Video: Demo](https://app.example.com/api/storage/portal-media/demo.mov)'
+    )
+  })
+
+  it('skips comments when the feedback has no linked Linear issue', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await linearHook.run(makeCommentCreatedEvent(), target, config, {
+      jobId: 'job-comment-2',
+    })
+
+    expect(result).toEqual({ success: true })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(mocks.claimHookDelivery).not.toHaveBeenCalled()
+  })
+
+  it('defensively skips private comments', async () => {
+    const result = await linearHook.run(
+      makeCommentCreatedEvent({ isPrivate: true }),
+      target,
+      config,
+      { jobId: 'job-comment-3' }
+    )
+
+    expect(result).toEqual({ success: true })
+    expect(mocks.findLinkedLinearIssueId).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates a retried comment job', async () => {
+    mocks.findLinkedLinearIssueId.mockResolvedValue('issue-uuid-1')
+    mocks.claimHookDelivery.mockResolvedValue(false)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await linearHook.run(makeCommentCreatedEvent(), target, config, {
+      jobId: 'job-comment-4',
+    })
+
+    expect(result).toEqual({ success: true })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('releases the delivery claim when Linear asks for a retry', async () => {
+    mocks.findLinkedLinearIssueId.mockResolvedValue('issue-uuid-1')
+    vi.stubGlobal('fetch', mockFetch(429))
+
+    const result = await linearHook.run(makeCommentCreatedEvent(), target, config, {
+      jobId: 'job-comment-5',
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.shouldRetry).toBe(true)
+    expect(mocks.releaseHookDelivery).toHaveBeenCalledWith('job-comment-5')
+    expect(mocks.failHookDelivery).not.toHaveBeenCalled()
   })
 })
 

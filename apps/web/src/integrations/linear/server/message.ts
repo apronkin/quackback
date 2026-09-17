@@ -2,7 +2,7 @@
  * Linear issue formatting utilities.
  */
 
-import type { EventData } from '@/lib/server/events/types'
+import type { CommentCreatedEvent, EventData } from '@/lib/server/events/types'
 import { stripHtml, truncate } from '@/lib/server/events/hook-utils'
 import { buildPostUrl, getAuthorName } from '@/lib/server/integrations/message-utils'
 
@@ -96,6 +96,17 @@ function mediaMarkdown(media: LinearMedia): string {
   return `![${media.label || 'Screenshot'}](${media.url})`
 }
 
+/** Preserve rich media even when the surrounding narrative must be truncated. */
+function buildLinearRichText(content: string, rootUrl: string, maxLength: number): string {
+  const media = extractMedia(content, rootUrl)
+  const text = truncate(absolutizeMarkdownUrls(stripHtml(content), rootUrl), maxLength)
+  const omittedMedia = media.filter((item) => !text.includes(item.url)).map(mediaMarkdown)
+
+  return [text, ...(omittedMedia.length > 0 ? ['', '**Attachments**', ...omittedMedia] : [])].join(
+    '\n'
+  )
+}
+
 /**
  * Build a Linear issue title and description from a post.created event.
  */
@@ -109,14 +120,11 @@ export function buildLinearIssueBody(
 
   const { post } = event.data
   const postUrl = buildPostUrl(rootUrl, post.boardSlug, post.id)
-  const media = extractMedia(post.content, rootUrl)
-  const content = truncate(absolutizeMarkdownUrls(stripHtml(post.content), rootUrl), 2000)
+  const content = buildLinearRichText(post.content, rootUrl, 2000)
   const author = getAuthorName(post)
-  const omittedMedia = media.filter((item) => !content.includes(item.url)).map(mediaMarkdown)
 
   const description = [
     content,
-    ...(omittedMedia.length > 0 ? ['', '**Attachments**', ...omittedMedia] : []),
     '',
     '---',
     `**Submitted by:** ${author}`,
@@ -125,4 +133,20 @@ export function buildLinearIssueBody(
   ].join('\n')
 
   return { title: post.title, description }
+}
+
+/** Build the Linear body for a newly published public Quackback comment. */
+export function buildLinearCommentBody(event: CommentCreatedEvent, rootUrl: string): string {
+  const { comment, post } = event.data
+  const author = getAuthorName(comment)
+  const content = buildLinearRichText(comment.content, rootUrl, 5000)
+  const commentUrl = `${buildPostUrl(rootUrl, post.boardSlug, post.id)}#comment-${comment.id}`
+
+  return [
+    `**${author} commented:**`,
+    '',
+    content,
+    '',
+    `[View comment in Quackback](${commentUrl})`,
+  ].join('\n')
 }

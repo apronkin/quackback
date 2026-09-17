@@ -3,8 +3,11 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { PostCreatedEvent, EventData } from '@/lib/server/events/types'
-import { buildLinearIssueBody } from '@/integrations/linear/server/message'
+import type { CommentCreatedEvent, PostCreatedEvent, EventData } from '@/lib/server/events/types'
+import {
+  buildLinearCommentBody,
+  buildLinearIssueBody,
+} from '@/integrations/linear/server/message'
 
 function makePostCreatedEvent(overrides: Record<string, unknown> = {}): PostCreatedEvent {
   return {
@@ -23,6 +26,33 @@ function makePostCreatedEvent(overrides: Record<string, unknown> = {}): PostCrea
         authorName: 'Jane Doe',
         authorEmail: 'jane@example.com',
         ...overrides,
+      },
+    },
+  }
+}
+
+function makeCommentCreatedEvent(
+  overrides: Record<string, unknown> = {}
+): CommentCreatedEvent {
+  return {
+    id: 'evt-comment-1',
+    type: 'comment.created',
+    timestamp: '2025-01-01T00:00:00Z',
+    actor: { type: 'user', userId: 'user_2', email: 'commenter@test.com' },
+    data: {
+      comment: {
+        id: 'comment_1',
+        content: 'I can reproduce this.',
+        authorName: 'John Smith',
+        authorEmail: 'john@example.com',
+        isPrivate: false,
+        ...overrides,
+      },
+      post: {
+        id: 'post_1',
+        title: 'Feature request',
+        boardId: 'board_1',
+        boardSlug: 'features',
       },
     },
   }
@@ -131,5 +161,46 @@ describe('buildLinearIssueBody', () => {
 
     expect(result.title).toBe('Feedback')
     expect(result.description).toBe('')
+  })
+})
+
+describe('buildLinearCommentBody', () => {
+  it('attributes the comment and links to its Quackback anchor', () => {
+    const result = buildLinearCommentBody(
+      makeCommentCreatedEvent(),
+      'https://feedback.example.com'
+    )
+
+    expect(result).toContain('**John Smith commented:**')
+    expect(result).toContain('I can reproduce this.')
+    expect(result).toContain(
+      '[View comment in Quackback](https://feedback.example.com/b/features/posts/post_1#comment-comment_1)'
+    )
+  })
+
+  it('syncs comment images and videos with absolute URLs', () => {
+    const result = buildLinearCommentBody(
+      makeCommentCreatedEvent({
+        content:
+          'Evidence\n\n![Screenshot](/api/storage/portal-media/shot.png)\n\n[Recording](/api/storage/portal-media/demo.mov)',
+      }),
+      'https://say.any.org'
+    )
+
+    expect(result).toContain(
+      '![Screenshot](https://say.any.org/api/storage/portal-media/shot.png)'
+    )
+    expect(result).toContain(
+      '![Video: Recording](https://say.any.org/api/storage/portal-media/demo.mov)'
+    )
+  })
+
+  it('falls back to the comment author email', () => {
+    const result = buildLinearCommentBody(
+      makeCommentCreatedEvent({ authorName: undefined }),
+      'https://feedback.example.com'
+    )
+
+    expect(result).toContain('**john@example.com commented:**')
   })
 })
