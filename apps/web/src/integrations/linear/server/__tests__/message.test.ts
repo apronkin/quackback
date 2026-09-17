@@ -78,6 +78,48 @@ describe('buildLinearIssueBody', () => {
     expect(result.description).not.toContain('voteCount')
   })
 
+  it('preserves headings, paragraphs, and bullet-list line breaks', () => {
+    const result = buildLinearIssueBody(
+      makePostCreatedEvent({
+        content: [
+          '## Vault',
+          '',
+          'The highest level where everything begins.',
+          '',
+          '- One vault can belong in multiple orgs.',
+          '- One vault can have multiple spaces.',
+          '',
+          '## Hub',
+          '',
+          'A container that holds multiple spaces together.',
+        ].join('\n'),
+      }),
+      'https://say.any.org'
+    )
+
+    expect(result.description).toContain(
+      [
+        '## Vault',
+        '',
+        'The highest level where everything begins.',
+        '',
+        '- One vault can belong in multiple orgs.',
+        '- One vault can have multiple spaces.',
+        '',
+        '## Hub',
+      ].join('\n')
+    )
+    expect(result.description).not.toContain('## Vault The highest')
+  })
+
+  it('keeps long feedback beyond the old 2,000-character preview limit', () => {
+    const content = `${'Architecture paragraph. '.repeat(120)}\n\n## Final section\n\nKept in Linear.`
+    const result = buildLinearIssueBody(makePostCreatedEvent({ content }), 'https://say.any.org')
+
+    expect(content.length).toBeGreaterThan(2000)
+    expect(result.description).toContain('## Final section\n\nKept in Linear.')
+  })
+
   it('turns stored image paths into absolute URLs Linear can import', () => {
     const result = buildLinearIssueBody(
       makePostCreatedEvent({
@@ -110,7 +152,7 @@ describe('buildLinearIssueBody', () => {
   it('keeps every media item even when the narrative is truncated', () => {
     const result = buildLinearIssueBody(
       makePostCreatedEvent({
-        content: `${'Long report '.repeat(250)}\n\n![Late screenshot](/api/storage/portal-media/late.png)`,
+        content: `${'Long report '.repeat(900)}\n\n![Late screenshot](/api/storage/portal-media/late.png)`,
       }),
       'https://say.any.org'
     )
@@ -135,6 +177,18 @@ describe('buildLinearIssueBody', () => {
     expect(result.description).toContain(
       '![Video: Demo](https://say.any.org/api/storage/portal-media/demo.mp4)'
     )
+  })
+
+  it('converts legacy HTML headings and lists to Markdown', () => {
+    const result = buildLinearIssueBody(
+      makePostCreatedEvent({
+        content:
+          '<h2>Vault</h2><p>The highest level.</p><ul><li>One org</li><li>Many spaces</li></ul>',
+      }),
+      'https://say.any.org'
+    )
+
+    expect(result.description).toContain('## Vault\n\nThe highest level.\n\n-   One org\n-   Many spaces')
   })
 
   it('falls back to email when authorName is missing', () => {
