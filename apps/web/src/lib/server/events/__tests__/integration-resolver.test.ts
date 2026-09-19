@@ -107,4 +107,36 @@ describe('buildIntegrationTargets (WO-8b)', () => {
       0
     )
   })
+
+  it('routes Linear post edits through the existing issue-creation mapping', () => {
+    const linear = mapping({
+      integrationType: 'linear',
+      integrationId: 'integration_1',
+      actionConfig: { channelId: 'team_1' },
+    })
+
+    expect(buildIntegrationTargets([linear], 'post.updated', [], 'https://p', decrypt)).toEqual([
+      {
+        type: 'linear',
+        target: { channelId: 'team_1' },
+        config: {
+          accessToken: 'token-for-enc',
+          rootUrl: 'https://p',
+          integrationId: 'integration_1',
+        },
+      },
+    ])
+  })
+
+  it('does not route post edits through another provider creation mapping', () => {
+    expect(
+      buildIntegrationTargets(
+        [mapping({ integrationType: 'github' })],
+        'post.updated',
+        [],
+        'https://p',
+        decrypt
+      )
+    ).toHaveLength(0)
+  })
 })

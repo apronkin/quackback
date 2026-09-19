@@ -602,7 +602,7 @@ export async function updatePost(
     changedFields.push('owner')
 
   if (changedFields.length > 0) {
-    dispatchPostUpdated(
+    await dispatchPostUpdated(
       buildEventActor(actor),
       {
         id: updatedPost.id,

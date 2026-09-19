@@ -21,7 +21,10 @@ import { updateLinearIssue } from './issues'
  * Update the active Linear issue linked to a post. Returns false when the post
  * has no Linear link yet, allowing the caller to use the normal create queue.
  */
-export async function refreshLinkedLinearPost(postId: PostId): Promise<boolean> {
+export async function refreshLinkedLinearPost(
+  postId: PostId,
+  integrationId?: IntegrationId
+): Promise<boolean> {
   const [post, link] = await Promise.all([
     db.query.posts.findFirst({ where: eq(posts.id, postId) }),
     db
@@ -36,7 +39,8 @@ export async function refreshLinkedLinearPost(postId: PostId): Promise<boolean> 
           eq(postExternalLinks.postId, postId),
           eq(postExternalLinks.integrationType, 'linear'),
           eq(postExternalLinks.status, 'active'),
-          eq(integrations.status, 'active')
+          eq(integrations.status, 'active'),
+          integrationId ? eq(postExternalLinks.integrationId, integrationId) : undefined
         )
       )
       .limit(1)
