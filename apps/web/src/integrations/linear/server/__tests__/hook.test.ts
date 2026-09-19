@@ -3,7 +3,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { CommentCreatedEvent, PostCreatedEvent, EventData } from '@/lib/server/events/types'
+import type {
+  CommentCreatedEvent,
+  PostCreatedEvent,
+  PostUpdatedEvent,
+  EventData,
+} from '@/lib/server/events/types'
 import { linearHook } from '@/integrations/linear/server/hook'
 import { updateLinearIssue } from '@/integrations/linear/server/issues'
 
@@ -13,12 +18,11 @@ const mocks = vi.hoisted(() => ({
   completeHookDelivery: vi.fn(),
   failHookDelivery: vi.fn(),
   releaseHookDelivery: vi.fn(),
+  refreshLinkedLinearPost: vi.fn(),
 }))
 
 vi.mock('@/integrations/linear/server/comments', async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import('@/integrations/linear/server/comments')
-  >()
+  const actual = await importOriginal<typeof import('@/integrations/linear/server/comments')>()
   return { ...actual, findLinkedLinearIssueId: mocks.findLinkedLinearIssueId }
 })
 
@@ -27,6 +31,10 @@ vi.mock('@/lib/server/events/hook-idempotency', () => ({
   completeHookDelivery: mocks.completeHookDelivery,
   failHookDelivery: mocks.failHookDelivery,
   releaseHookDelivery: mocks.releaseHookDelivery,
+}))
+
+vi.mock('@/integrations/linear/server/post-sync', () => ({
+  refreshLinkedLinearPost: mocks.refreshLinkedLinearPost,
 }))
 
 // ---------------------------------------------------------------------------
@@ -62,9 +70,7 @@ function makePostCreatedEvent(overrides: Record<string, unknown> = {}): PostCrea
   }
 }
 
-function makeCommentCreatedEvent(
-  overrides: Record<string, unknown> = {}
-): CommentCreatedEvent {
+function makeCommentCreatedEvent(overrides: Record<string, unknown> = {}): CommentCreatedEvent {
   return {
     id: 'evt-comment-1',
     type: 'comment.created',
@@ -88,6 +94,24 @@ function makeCommentCreatedEvent(
   }
 }
 
+function makePostUpdatedEvent(changedFields = ['content']): PostUpdatedEvent {
+  return {
+    id: 'evt-update-1',
+    type: 'post.updated',
+    timestamp: '2025-01-01T00:00:00Z',
+    actor: { type: 'user', userId: 'user_1', email: 'test@test.com' },
+    data: {
+      post: {
+        id: 'post_1',
+        title: 'Updated bug report',
+        boardId: 'board_1',
+        boardSlug: 'bugs',
+      },
+      changedFields,
+    },
+  }
+}
+
 const target = { channelId: 'team-abc' }
 const config = {
   accessToken: 'lin_test_token',
@@ -107,6 +131,8 @@ beforeEach(() => {
   mocks.failHookDelivery.mockResolvedValue(undefined)
   mocks.releaseHookDelivery.mockReset()
   mocks.releaseHookDelivery.mockResolvedValue(undefined)
+  mocks.refreshLinkedLinearPost.mockReset()
+  mocks.refreshLinkedLinearPost.mockResolvedValue(true)
 })
 
 // ---------------------------------------------------------------------------
@@ -208,6 +234,32 @@ describe('linearHook', () => {
     expect(result.success).toBe(false)
     expect(result.error).toBe('Rate limited')
     expect(result.shouldRetry).toBe(true)
+  })
+
+  it('refreshes the linked issue after a title or content edit', async () => {
+    const result = await linearHook.run(makePostUpdatedEvent(), target, config)
+
+    expect(result).toEqual({ success: true })
+    expect(mocks.refreshLinkedLinearPost).toHaveBeenCalledWith('post_1', 'integration_1')
+  })
+
+  it('does not refresh issue content for unrelated post metadata edits', async () => {
+    const result = await linearHook.run(makePostUpdatedEvent(['tags', 'owner']), target, config)
+
+    expect(result).toEqual({ success: true })
+    expect(mocks.refreshLinkedLinearPost).not.toHaveBeenCalled()
+  })
+
+  it('retries an edit while the issue-creation link is not ready', async () => {
+    mocks.refreshLinkedLinearPost.mockResolvedValue(false)
+
+    const result = await linearHook.run(makePostUpdatedEvent(['title']), target, config)
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Linked Linear issue is not ready yet.',
+      shouldRetry: true,
+    })
   })
 
   it('adds a public comment to the already-linked Linear issue', async () => {

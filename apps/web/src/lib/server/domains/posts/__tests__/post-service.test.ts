@@ -3,6 +3,7 @@ import type { PostId, PrincipalId, PostStatusId, PostTagId } from '@quackback/id
 
 const createActivity = vi.fn()
 const dispatchPostStatusChanged = vi.fn()
+const dispatchPostUpdated = vi.fn()
 const dispatchPostOwnerAssigned = vi.fn()
 const buildEventActor = vi.fn((actor) => actor)
 
@@ -53,7 +54,7 @@ vi.mock('@/lib/server/db', async (importOriginal) => {
 vi.mock('@/lib/server/events/dispatch', () => ({
   dispatchPostCreated: vi.fn(),
   dispatchPostStatusChanged,
-  dispatchPostUpdated: vi.fn(),
+  dispatchPostUpdated,
   dispatchPostOwnerAssigned,
   buildEventActor,
 }))
@@ -70,6 +71,8 @@ describe('post.service updatePost', () => {
   beforeEach(() => {
     createActivity.mockClear()
     dispatchPostStatusChanged.mockClear()
+    dispatchPostUpdated.mockReset()
+    dispatchPostUpdated.mockResolvedValue(undefined)
     dispatchPostOwnerAssigned.mockClear()
     buildEventActor.mockClear()
     mockPostsFindFirst.mockReset()
@@ -305,5 +308,32 @@ describe('post.service updatePost', () => {
 
     // The UPDATE set never carries an eta key when eta is not in the input.
     expect(updateSet).toHaveBeenCalledWith(expect.not.objectContaining({ eta: expect.anything() }))
+  })
+
+  it('waits until the durable post.updated event has been written', async () => {
+    let releaseDispatch!: () => void
+    dispatchPostUpdated.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDispatch = resolve
+        })
+    )
+
+    const { updatePost } = await import('../post.service')
+    let settled = false
+    const update = updatePost(
+      'post_123' as PostId,
+      { title: 'Updated title' },
+      { principalId: 'principal_actor' as PrincipalId }
+    ).then(() => {
+      settled = true
+    })
+
+    await vi.waitFor(() => expect(dispatchPostUpdated).toHaveBeenCalledTimes(1))
+    expect(settled).toBe(false)
+
+    releaseDispatch()
+    await update
+    expect(settled).toBe(true)
   })
 })

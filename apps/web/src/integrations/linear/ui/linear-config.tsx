@@ -38,8 +38,9 @@ interface LinearConfigProps {
 const EVENT_CONFIG = [
   {
     id: 'post.created' as const,
-    label: 'Create issue from new feedback',
-    description: 'Automatically create a Linear issue when new feedback is submitted',
+    label: 'Create and update feedback issues',
+    description:
+      'Create a Linear issue for new feedback and keep its title, text, images, and videos current after edits',
   },
   {
     id: 'post.status_changed' as const,

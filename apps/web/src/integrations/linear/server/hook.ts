@@ -4,17 +4,13 @@
  */
 
 import type { HookHandler, HookResult, HookRunContext } from '@/lib/server/events/hook-types'
-import type { CommentCreatedEvent, EventData } from '@/lib/server/events/types'
+import type { CommentCreatedEvent, EventData, PostUpdatedEvent } from '@/lib/server/events/types'
+import type { IntegrationId, PostId } from '@quackback/ids'
 import { isRetryableError } from '@/lib/server/events/hook-utils'
-import {
-  buildLinearCommentBody,
-  buildLinearIssueBody,
-} from '@/integrations/linear/server/message'
+import { buildLinearCommentBody, buildLinearIssueBody } from '@/integrations/linear/server/message'
 import { linearIssues } from '@/integrations/linear/server/issues'
-import {
-  createLinearComment,
-  findLinkedLinearIssueId,
-} from '@/integrations/linear/server/comments'
+import { createLinearComment, findLinkedLinearIssueId } from '@/integrations/linear/server/comments'
+import { refreshLinkedLinearPost } from '@/integrations/linear/server/post-sync'
 import {
   claimHookDelivery,
   completeHookDelivery,
@@ -100,6 +96,31 @@ async function syncComment(
   }
 }
 
+async function syncPostUpdate(event: PostUpdatedEvent, config: LinearConfig): Promise<HookResult> {
+  if (!config.integrationId) return { success: true }
+  if (!event.data.changedFields.some((field) => field === 'title' || field === 'content')) {
+    return { success: true }
+  }
+
+  try {
+    const updated = await refreshLinkedLinearPost(
+      event.data.post.id as PostId,
+      config.integrationId as IntegrationId
+    )
+    if (!updated) {
+      return {
+        success: false,
+        error: 'Linked Linear issue is not ready yet.',
+        shouldRetry: true,
+      }
+    }
+    log.info({ post_id: event.data.post.id }, 'linked issue refreshed after post edit')
+    return { success: true }
+  } catch (error) {
+    return linearFailure(error)
+  }
+}
+
 export const linearHook: HookHandler = {
   async run(
     event: EventData,
@@ -115,7 +136,12 @@ export const linearHook: HookHandler = {
       return syncComment(event, linearConfig, ctx)
     }
 
-    // Only create issues for new feedback
+    if (event.type === 'post.updated') {
+      return syncPostUpdate(event, linearConfig)
+    }
+
+    // Only create issues for new feedback. Edits are handled above and update
+    // the existing link in place.
     if (event.type !== 'post.created') {
       return { success: true }
     }

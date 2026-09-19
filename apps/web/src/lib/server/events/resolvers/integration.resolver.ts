@@ -29,6 +29,24 @@ export interface CachedMapping {
   filters: unknown
 }
 
+/**
+ * A Linear issue created from feedback remains the same linked issue when the
+ * post is edited. Treat those edits as part of the post.created route so every
+ * existing connection gets content refreshes without a schema backfill or a
+ * second setting that can drift out of sync.
+ */
+export function integrationMappingMatchesEvent(
+  mapping: Pick<CachedMapping, 'eventType' | 'integrationType'>,
+  eventType: string
+): boolean {
+  return (
+    mapping.eventType === eventType ||
+    (eventType === 'post.updated' &&
+      mapping.integrationType === 'linear' &&
+      mapping.eventType === 'post.created')
+  )
+}
+
 async function loadMappings(): Promise<CachedMapping[]> {
   const cached = await cacheGet<CachedMapping[]>(CACHE_KEYS.INTEGRATION_MAPPINGS)
   if (cached) return cached
@@ -65,7 +83,7 @@ export function buildIntegrationTargets(
   const seen = new Set<string>()
 
   for (const m of mappings) {
-    if (m.eventType !== eventType) continue
+    if (!integrationMappingMatchesEvent(m, eventType)) continue
 
     const filters = m.filters as { boardIds?: string[] } | null
     if (
@@ -151,7 +169,9 @@ export const integrationResolver: SinkResolver = {
   async resolve(event: DomainEvent): Promise<HookTarget[]> {
     if (isPrivateComment(event)) return []
     const mappings = await loadMappings()
-    const relevant = mappings.filter((m) => m.eventType === event.type)
+    const relevant = mappings.filter((mapping) =>
+      integrationMappingMatchesEvent(mapping, event.type)
+    )
     if (relevant.length === 0) return []
     const context = await buildHookContext()
     if (!context) throw new Error('Failed to build integration hook context')
